@@ -1,279 +1,345 @@
-import re
-
+import plotly.graph_objects as go
 import streamlit as st
 
 
-MANUFACTURING_KEYWORDS = [
-    "機台",
-    "產線",
-    "設備",
-    "輸送帶",
-    "馬達",
-    "伺服",
-    "壓力",
-    "氣缸",
-    "感應器",
-    "sensor",
-    "plc",
-    "cnc",
-    "沖床",
-    "射出",
-    "包裝",
-    "貼標",
-    "焊接",
-    "烘箱",
-    "泵浦",
-    "閥",
-    "軸承",
-    "皮帶",
-    "治具",
-    "夾具",
-    "robot",
-    "robot arm",
-    "機械手",
-]
-
-NON_MANUFACTURING_KEYWORDS = [
-    "excel",
-    "word",
-    "powerpoint",
-    "網頁",
-    "網站",
-    "手機",
-    "app",
-    "電腦",
-    "筆電",
-    "印表機",
-    "wifi",
-    "路由器",
-    "財務系統",
-    "erp",
-    "email",
-    "信箱",
-    "windows",
-    "browser",
-    "chrome",
-]
-
-MECHANICAL_KEYWORDS = [
-    "卡料",
-    "異音",
-    "震動",
-    "皮帶",
-    "軸承",
-    "磨損",
-    "堵塞",
-    "偏移",
-    "鬆動",
-    "斷裂",
-    "夾料",
-    "刮傷",
-    "機構",
-    "輸送",
-]
-
-ELECTRICAL_KEYWORDS = [
-    "sensor",
-    "感應器",
-    "伺服",
-    "馬達",
-    "過載",
-    "過熱",
-    "電流",
-    "電壓",
-    "plc",
-    "io",
-    "i/o",
-    "訊號",
-    "斷線",
-    "短路",
-    "變頻器",
-    "driver",
-    "alarm",
-    "警報",
-]
-
-OPERATION_KEYWORDS = [
-    "參數",
-    "設定",
-    "未歸零",
-    "歸零",
-    "配方",
-    "recipe",
-    "操作",
-    "模式",
-    "手動",
-    "自動",
-    "數值",
-    "超出",
-    "未啟動",
-    "未復歸",
-]
+st.set_page_config(
+    page_title="智慧產線稼動率與異常排查看板",
+    page_icon="🏭",
+    layout="wide",
+)
 
 
-def normalize_text(*values: str) -> str:
-    """將使用者輸入合併並轉小寫，方便後續關鍵字判斷。"""
-    return " ".join(value.strip().lower() for value in values if value)
+ALARM_KNOWLEDGE_BASE = {
+    "Err-401 馬達過熱": {
+        "category": "電氣/控制問題",
+        "summary": "馬達溫度超出安全範圍，常見原因包含長時間高負載、散熱不良、風扇異常、軸承阻力過大或驅動器參數設定不當。",
+        "checks": [
+            "確認機台已停止進料，操作員站位避開旋轉軸與高溫區域，檢查馬達外殼是否有明顯高溫、焦味或異音。",
+            "查看控制面板或變頻器/伺服驅動器的負載率與溫度紀錄，確認散熱風扇是否運轉、濾網是否堵塞。",
+        ],
+        "sop": [
+            "按下停止鍵並完成安全確認，必要時執行 LOTO（上鎖掛牌）後再靠近檢查。",
+            "清潔馬達散熱孔、風扇與控制箱濾網，排除周邊堆料或遮蔽物。",
+            "確認負載機構無卡滯後，於 HMI 清除 Err-401 警報並執行 Reset。",
+            "以低速或手動模式試運轉 3 至 5 分鐘，確認電流、溫度與異音均正常後恢復自動生產。",
+        ],
+        "tpm": "建議將馬達溫度、散熱風扇狀態與控制箱濾網清潔納入每日自主保養點檢表，並設定每週趨勢追蹤，提前發現負載上升或散熱衰退。",
+    },
+    "Err-302 感應器異常": {
+        "category": "電氣/控制問題",
+        "summary": "感應器訊號未達預期，可能由感應器髒污、位置偏移、線路鬆脫、反光干擾或 PLC I/O 訊號異常造成。",
+        "checks": [
+            "確認安全光柵、門蓋與急停狀態正常，並檢查感應器前方是否有油污、粉塵、殘料或治具遮擋。",
+            "觀察感應器 LED 燈號與 HMI I/O 監看畫面，確認放入與移除工件時訊號是否同步切換。",
+        ],
+        "sop": [
+            "停止自動循環，將機台切至手動或維修模式。",
+            "清潔感應器鏡面與偵測區域，確認固定座無鬆動、線材接頭無脫落。",
+            "依標準治具位置重新校正感應器角度與距離。",
+            "於 HMI 清除 Err-302 警報，執行單步測試，確認 I/O 訊號穩定後恢復自動運轉。",
+        ],
+        "tpm": "建議把感應器清潔、固定螺絲確認與 I/O 燈號測試加入班前點檢，對高粉塵工站可縮短清潔週期並建立異常次數 Pareto 分析。",
+    },
+    "Err-105 實體卡料": {
+        "category": "機構/機械問題",
+        "summary": "物料、治具或半成品停留在非預期位置，常見原因包含輸送帶偏移、導軌間隙不當、料件變形、定位氣缸未到位或異物阻塞。",
+        "checks": [
+            "確認機台完全停止後再開啟護罩，禁止直接伸手進入夾治具、輸送帶或氣缸作動區。",
+            "檢查卡料位置、導軌寬度、輸送帶張力與定位氣缸到位訊號，確認是否有變形料件或異物。",
+        ],
+        "sop": [
+            "按下停止鍵，確認所有動作軸停止，必要時釋放殘壓後再處理。",
+            "依物料流向反向或側向移除卡住料件，避免硬拉造成治具或感應器損壞。",
+            "檢查導軌、擋塊、皮帶與氣缸是否偏移或鬆動，將料道恢復至標準位置。",
+            "清除 Err-105 警報後，以慢速模式空跑一循環，再投入少量物料試產確認不卡料。",
+        ],
+        "tpm": "建議建立卡料位置紀錄表，將高頻卡料點納入改善專案，並於 PM 中加入導軌間隙、皮帶張力與治具磨耗量測。",
+    },
+}
 
 
-def has_keyword(text: str, keywords: list[str]) -> bool:
-    """檢查輸入內容是否命中任一關鍵字。"""
-    return any(keyword.lower() in text for keyword in keywords)
+MACHINE_NOTES = {
+    "CNC-01": "高精度切削設備，需特別注意主軸負載、冷卻液狀態與夾治具定位。",
+    "封裝機-A": "連續式封裝設備，需特別注意進料節拍、封口溫度、輸送帶與感測器潔淨度。",
+    "點膠機-B": "精密塗佈設備，需特別注意膠壓、針頭堵塞、定位精度與環境溫濕度。",
+}
 
 
-def validate_trigger(machine_name: str, error_code: str, abnormal_desc: str) -> tuple[bool, str]:
-    """觸發檢查：確認必填欄位與製造業實體機台情境。"""
-    if not machine_name.strip() or not error_code.strip():
-        return False, "請至少輸入「機台名稱/類型」與「錯誤代碼」，才能啟動排查流程。"
-
-    combined_text = normalize_text(machine_name, error_code, abnormal_desc)
-
-    if has_keyword(combined_text, NON_MANUFACTURING_KEYWORDS):
-        return False, "此工具僅支援製造業實體機台異常排查，不處理軟體、手機、網頁或辦公系統問題。"
-
-    if not has_keyword(combined_text, MANUFACTURING_KEYWORDS):
-        return False, "請確認輸入內容包含製造業機台或產線設備資訊，例如：輸送帶、馬達、CNC、PLC、感應器等。"
-
-    return True, ""
-
-
-def classify_issue(machine_name: str, error_code: str, abnormal_desc: str) -> str:
-    """分類：依錯誤代碼與異常現象自動判斷故障可能類別。"""
-    combined_text = normalize_text(machine_name, error_code, abnormal_desc)
-
-    scores = {
-        "機械問題": sum(keyword.lower() in combined_text for keyword in MECHANICAL_KEYWORDS),
-        "電氣控制問題": sum(keyword.lower() in combined_text for keyword in ELECTRICAL_KEYWORDS),
-        "人為操作問題": sum(keyword.lower() in combined_text for keyword in OPERATION_KEYWORDS),
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(135deg, #0f172a 0%, #111827 48%, #1f2937 100%);
+        color: #e5e7eb;
     }
-
-    error_code_upper = error_code.strip().upper()
-    if re.search(r"(M|MECH|BELT|JAM|LOAD)", error_code_upper):
-        scores["機械問題"] += 2
-    if re.search(r"(E|ELEC|SV|SERVO|PLC|IO|OL|OC|OH)", error_code_upper):
-        scores["電氣控制問題"] += 2
-    if re.search(r"(P|PARA|SET|ZERO|OP|MODE)", error_code_upper):
-        scores["人為操作問題"] += 2
-
-    return max(scores, key=scores.get)
-
-
-def build_safety_checks(issue_type: str) -> list[str]:
-    """引導式安全檢查：在復歸前提供現場安全確認動作。"""
-    common_check = "確認現場人員已離開可動機構範圍，必要時執行 LOTO 上鎖掛牌，並確認急停按鈕狀態。"
-
-    checks_by_type = {
-        "機械問題": [
-            common_check,
-            "確認輸送路徑、治具與防護門內無卡料、掉料或異物，且安全護罩已正確關閉。",
-        ],
-        "電氣控制問題": [
-            common_check,
-            "確認主電源、控制電源與氣源壓力在允收範圍內，並檢查安全光柵或門鎖訊號是否正常。",
-        ],
-        "人為操作問題": [
-            common_check,
-            "確認目前機台模式、產品配方與參數版本正確，且原點復歸條件已滿足。",
-        ],
+    [data-testid="stSidebar"] {
+        background: #111827;
+        border-right: 1px solid #374151;
     }
-
-    return checks_by_type[issue_type]
-
-
-def build_sop(issue_type: str) -> list[str]:
-    """復歸 SOP：依分類輸出 3 個標準復歸步驟。"""
-    sop_by_type = {
-        "機械問題": [
-            "停機並確認能量隔離後，清除卡料或異物，檢查皮帶、治具、軸承與限位機構是否鬆動或磨損。",
-            "關閉安全門與護罩，解除急停，於 HMI 清除警報並執行單動或寸動確認機構動作順暢。",
-            "切換低速試運轉 3-5 分鐘，確認無異音、無偏移、無再次卡料後，再恢復自動生產。",
-        ],
-        "電氣控制問題": [
-            "停機後確認電控箱無異味、焦痕或異常高溫，檢查感應器、線束、端子與伺服/變頻器警報狀態。",
-            "排除鬆脫或遮擋問題後，復歸安全迴路，於 HMI 或控制器清除 Alarm，必要時重新原點復歸。",
-            "以手動模式測試 I/O、馬達與感應器訊號，再以低速自動循環確認警報不再發生。",
-        ],
-        "人為操作問題": [
-            "確認產品型號、工單、配方與參數版本是否一致，將超出合理範圍的設定值調回標準值。",
-            "依機台作業標準書重新執行原點復歸、模式切換與啟動前點檢，並清除 HMI 警報。",
-            "先執行首件確認或短循環試產，確認尺寸、節拍與良率穩定後，再交回量產。",
-        ],
+    .main-title {
+        padding: 22px 26px;
+        border: 1px solid #4b5563;
+        border-radius: 8px;
+        background: linear-gradient(90deg, rgba(31, 41, 55, 0.95), rgba(17, 24, 39, 0.85));
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+        margin-bottom: 18px;
     }
-
-    return sop_by_type[issue_type]
-
-
-def build_preventive_action(issue_type: str) -> str:
-    """預防建議：提供符合 Lean 或 TPM 的維護管理建議。"""
-    actions_by_type = {
-        "機械問題": "將易卡料點、皮帶張力、治具定位與軸承異音納入 TPM 每日自主保養點檢表，並用目視化標準標示正常範圍。",
-        "電氣控制問題": "建立感應器清潔、線束固定、端子鬆動與伺服警報履歷的週期性 PM 檢查，並用 Pareto 分析追蹤高頻 Alarm。",
-        "人為操作問題": "將配方切換與參數確認設計成首件前 Check Sheet，並用防呆欄位限制超規參數輸入，降低換線失誤。",
+    .main-title h1 {
+        margin: 0;
+        color: #f9fafb;
+        font-size: 34px;
+        letter-spacing: 0;
     }
+    .main-title p {
+        margin: 8px 0 0 0;
+        color: #cbd5e1;
+        font-size: 16px;
+    }
+    .section-card {
+        padding: 18px 20px;
+        border: 1px solid #4b5563;
+        border-radius: 8px;
+        background: rgba(17, 24, 39, 0.82);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+        margin-bottom: 16px;
+    }
+    .section-card h3 {
+        margin: 0 0 10px 0;
+        color: #f9fafb;
+        font-size: 20px;
+    }
+    .status-pill {
+        display: inline-block;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background: #0f766e;
+        color: #ecfeff;
+        font-weight: 700;
+        border: 1px solid #14b8a6;
+        margin-right: 8px;
+    }
+    .warning-pill {
+        display: inline-block;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background: #7c2d12;
+        color: #ffedd5;
+        font-weight: 700;
+        border: 1px solid #fb923c;
+    }
+    .report-box {
+        padding: 22px 24px;
+        border: 1px solid #64748b;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.9);
+        margin-top: 12px;
+    }
+    .report-box h1, .report-box h2, .report-box h3 {
+        color: #f8fafc;
+    }
+    .report-box li, .report-box p {
+        color: #dbeafe;
+        line-height: 1.75;
+    }
+    div[data-testid="stMetric"] {
+        border: 1px solid #475569;
+        border-radius: 8px;
+        padding: 16px;
+        background: rgba(30, 41, 59, 0.95);
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #cbd5e1;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #f8fafc;
+    }
+    .stButton > button {
+        width: 100%;
+        border: 1px solid #38bdf8;
+        background: #0369a1;
+        color: white;
+        font-weight: 700;
+        border-radius: 6px;
+        padding: 0.7rem 1rem;
+    }
+    .stButton > button:hover {
+        border-color: #7dd3fc;
+        background: #075985;
+        color: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    return actions_by_type[issue_type]
+
+if "dashboard_updated" not in st.session_state:
+    st.session_state.dashboard_updated = True
 
 
-def format_report(machine_name: str, error_code: str, abnormal_desc: str, issue_type: str) -> str:
-    """格式化輸出：組成機台異常排查與處置報告。"""
-    safety_checks = build_safety_checks(issue_type)
-    sop_steps = build_sop(issue_type)
-    preventive_action = build_preventive_action(issue_type)
-    description = abnormal_desc.strip() or "未提供，請現場人員補充異音、燈號、停機位置或 HMI 訊息。"
+st.markdown(
+    """
+    <div class="main-title">
+        <h1>🏭 智慧產線稼動率與異常排查看板</h1>
+        <p>IE Production War Room Dashboard｜整合時間稼動率、停機比例與 AI Skill 異常診斷 SOP</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    return f"""
+
+with st.sidebar:
+    st.markdown("## ⚙️ 參數選取與數據控制區")
+    st.markdown("---")
+
+    selected_machine = st.selectbox(
+        "故障機台型號",
+        options=list(MACHINE_NOTES.keys()),
+        index=0,
+    )
+
+    selected_alarm = st.selectbox(
+        "錯誤代碼 / Alarm Code",
+        options=list(ALARM_KNOWLEDGE_BASE.keys()),
+        index=0,
+    )
+
+    planned_time = st.slider(
+        "計劃運轉時間（min）",
+        min_value=120,
+        max_value=480,
+        value=480,
+        step=10,
+    )
+
+    downtime = st.slider(
+        "故障停機時間（min）",
+        min_value=0,
+        max_value=120,
+        value=30,
+        step=5,
+    )
+
+    update_button = st.button("更新戰情室看板", type="primary")
+
+    if update_button:
+        st.session_state.dashboard_updated = True
+
+    st.markdown("---")
+    st.info(MACHINE_NOTES[selected_machine])
+
+
+left_column, right_column = st.columns([0.34, 0.66], gap="large")
+
+actual_runtime = max(planned_time - downtime, 0)
+availability_rate = (actual_runtime / planned_time) * 100 if planned_time > 0 else 0
+alarm_info = ALARM_KNOWLEDGE_BASE[selected_alarm]
+
+
+with left_column:
+    st.markdown(
+        f"""
+        <div class="section-card">
+            <h3>📌 目前通報資訊</h3>
+            <p><span class="status-pill">機台</span>{selected_machine}</p>
+            <p><span class="warning-pill">Alarm</span>{selected_alarm}</p>
+            <p><b>初步分類：</b>{alarm_info["category"]}</p>
+            <p><b>設備特性：</b>{MACHINE_NOTES[selected_machine]}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"""
+        <div class="section-card">
+            <h3>🧭 IE 判讀摘要</h3>
+            <p>{alarm_info["summary"]}</p>
+            <p><b>看板狀態：</b>已依目前參數完成稼動率估算與異常處置建議。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+with right_column:
+    st.markdown(
+        """
+        <div class="section-card">
+            <h3>📊 數據指標與圓餅圖表區</h3>
+            <p>依據左側輸入之計劃運轉時間與故障停機時間，自動換算時間稼動率。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
+    metric_col_1.metric("計劃時間 (min)", f"{planned_time}")
+    metric_col_2.metric("停機時間 (min)", f"{downtime}")
+    metric_col_3.metric("時間稼動率 (%)", f"{availability_rate:.1f}")
+
+    pie_fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=["實際運轉時間", "故障停機時間"],
+                values=[actual_runtime, downtime],
+                hole=0.42,
+                marker=dict(colors=["#14b8a6", "#f97316"]),
+                textinfo="label+percent",
+                textfont=dict(size=16, color="#f8fafc"),
+                hovertemplate="%{label}<br>%{value} min<br>%{percent}<extra></extra>",
+            )
+        ]
+    )
+    pie_fig.update_layout(
+        title=dict(
+            text="時間分配圓餅圖",
+            font=dict(size=22, color="#f8fafc"),
+            x=0.02,
+        ),
+        paper_bgcolor="rgba(15, 23, 42, 0.0)",
+        plot_bgcolor="rgba(15, 23, 42, 0.0)",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.1,
+            xanchor="center",
+            x=0.5,
+            font=dict(color="#e5e7eb", size=14),
+        ),
+        margin=dict(l=20, r=20, t=70, b=40),
+        height=430,
+    )
+    st.plotly_chart(pie_fig, use_container_width=True)
+
+
+st.markdown("## 🤖 AI Skill 智慧診斷與總結區")
+
+with st.expander("展開 / 收合：機台異常排查與處置報告", expanded=True):
+    with st.container(border=True):
+        st.markdown(
+            f"""
 # 🚨 【機台異常排查與處置報告】
 
 ## 一、 異常現況與初步分類
-* **通報機台/代碼**：{machine_name.strip()} / {error_code.strip()}
-* **現場異常現象**：{description}
-* **故障可能類別**：{issue_type}
+* **通報機台/代碼**：{selected_machine} / {selected_alarm}
+* **故障可能類別**：{alarm_info["category"]}
+* **異常摘要**：{alarm_info["summary"]}
 
 ## 二、 現場引導檢查確認（請依序確認）
-1. 🛠️ **步驟一**：{safety_checks[0]}
-2. 🛠️ **步驟二**：{safety_checks[1]}
+1. 🛠️ **步驟一**：{alarm_info["checks"][0]}
+2. 🛠️ **步驟二**：{alarm_info["checks"][1]}
 
 ## 三、 排除復歸步驟 (SOP)
 * **復歸程序**：
-  1. {sop_steps[0]}
-  2. {sop_steps[1]}
-  3. {sop_steps[2]}
-* **💡 預防性維護建議**：{preventive_action}
-"""
+  1. {alarm_info["sop"][0]}
+  2. {alarm_info["sop"][1]}
+  3. {alarm_info["sop"][2]}
+  4. {alarm_info["sop"][3]}
+
+* **💡 預防性維護建議**：{alarm_info["tpm"]}
+        """
+        )
 
 
-st.set_page_config(
-    page_title="產線機台異常排查與復歸智慧助理",
-    page_icon="🚨",
-    layout="centered",
-)
-
-st.title("🚨 產線機台異常排查與復歸智慧助理")
-st.caption("Industrial Management / Troubleshooting / TPM Recovery Assistant")
-
-with st.container(border=True):
-    st.subheader("異常通報資訊")
-    machine_name = st.text_input(
-        "機台名稱 / 類型",
-        placeholder="例：A03 輸送帶、CNC-02、包裝機、PLC 控制站",
-    )
-    error_code = st.text_input(
-        "錯誤代碼（Error Code）",
-        placeholder="例：E-214、SV-OL、JAM-01、P-ZERO",
-    )
-    abnormal_desc = st.text_area(
-        "現場異常現象簡述",
-        placeholder="例：輸送帶卡料後停機，HMI 顯示馬達過載，現場有異音。",
-        height=130,
-    )
-
-if st.button("開始智慧排查診斷", type="primary", use_container_width=True):
-    is_valid, error_message = validate_trigger(machine_name, error_code, abnormal_desc)
-
-    if not is_valid:
-        st.error(error_message)
-    else:
-        issue_type = classify_issue(machine_name, error_code, abnormal_desc)
-        report = format_report(machine_name, error_code, abnormal_desc, issue_type)
-        st.markdown(report)
-        st.info("提醒：若涉及高壓、高溫、旋轉機構或安全迴路異常，請由合格設備工程師或電控人員執行復歸。")
+st.caption("作業二作品｜智慧產線稼動率與異常排查看板｜Streamlit + Plotly")
