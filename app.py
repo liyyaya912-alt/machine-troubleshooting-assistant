@@ -173,8 +173,16 @@ st.markdown(
 )
 
 
-if "dashboard_updated" not in st.session_state:
-    st.session_state.dashboard_updated = True
+DEFAULT_DASHBOARD_STATE = {
+    "machine": "CNC-01",
+    "alarm": "Err-401 馬達過熱",
+    "planned_time": 480,
+    "downtime": 30,
+    "update_count": 0,
+}
+
+for key, value in DEFAULT_DASHBOARD_STATE.items():
+    st.session_state.setdefault(key, value)
 
 
 st.markdown(
@@ -195,20 +203,20 @@ with st.sidebar:
     selected_machine = st.selectbox(
         "故障機台型號",
         options=list(MACHINE_NOTES.keys()),
-        index=0,
+        index=list(MACHINE_NOTES.keys()).index(st.session_state.machine),
     )
 
     selected_alarm = st.selectbox(
         "錯誤代碼 / Alarm Code",
         options=list(ALARM_KNOWLEDGE_BASE.keys()),
-        index=0,
+        index=list(ALARM_KNOWLEDGE_BASE.keys()).index(st.session_state.alarm),
     )
 
     planned_time = st.slider(
         "計劃運轉時間（min）",
         min_value=120,
         max_value=480,
-        value=480,
+        value=st.session_state.planned_time,
         step=10,
     )
 
@@ -216,24 +224,34 @@ with st.sidebar:
         "故障停機時間（min）",
         min_value=0,
         max_value=120,
-        value=30,
+        value=st.session_state.downtime,
         step=5,
     )
 
     update_button = st.button("更新戰情室看板", type="primary")
 
     if update_button:
-        st.session_state.dashboard_updated = True
+        st.session_state.machine = selected_machine
+        st.session_state.alarm = selected_alarm
+        st.session_state.planned_time = planned_time
+        st.session_state.downtime = downtime
+        st.session_state.update_count += 1
+        st.success(f"戰情室看板已更新：{selected_machine} / {selected_alarm}")
 
     st.markdown("---")
     st.info(MACHINE_NOTES[selected_machine])
 
 
+applied_machine = st.session_state.machine
+applied_alarm = st.session_state.alarm
+applied_planned_time = st.session_state.planned_time
+applied_downtime = st.session_state.downtime
+
 left_column, right_column = st.columns([0.34, 0.66], gap="large")
 
-actual_runtime = max(planned_time - downtime, 0)
-availability_rate = (actual_runtime / planned_time) * 100 if planned_time > 0 else 0
-alarm_info = ALARM_KNOWLEDGE_BASE[selected_alarm]
+actual_runtime = max(applied_planned_time - applied_downtime, 0)
+availability_rate = (actual_runtime / applied_planned_time) * 100 if applied_planned_time > 0 else 0
+alarm_info = ALARM_KNOWLEDGE_BASE[applied_alarm]
 
 
 with left_column:
@@ -241,10 +259,10 @@ with left_column:
         f"""
         <div class="section-card">
             <h3>📌 目前通報資訊</h3>
-            <p><span class="status-pill">機台</span>{selected_machine}</p>
-            <p><span class="warning-pill">Alarm</span>{selected_alarm}</p>
+            <p><span class="status-pill">機台</span>{applied_machine}</p>
+            <p><span class="warning-pill">Alarm</span>{applied_alarm}</p>
             <p><b>初步分類：</b>{alarm_info["category"]}</p>
-            <p><b>設備特性：</b>{MACHINE_NOTES[selected_machine]}</p>
+            <p><b>設備特性：</b>{MACHINE_NOTES[applied_machine]}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -274,15 +292,15 @@ with right_column:
     )
 
     metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
-    metric_col_1.metric("計劃時間 (min)", f"{planned_time}")
-    metric_col_2.metric("停機時間 (min)", f"{downtime}")
+    metric_col_1.metric("計劃時間 (min)", f"{applied_planned_time}")
+    metric_col_2.metric("停機時間 (min)", f"{applied_downtime}")
     metric_col_3.metric("時間稼動率 (%)", f"{availability_rate:.1f}")
 
     pie_fig = go.Figure(
         data=[
             go.Pie(
                 labels=["實際運轉時間", "故障停機時間"],
-                values=[actual_runtime, downtime],
+                values=[actual_runtime, applied_downtime],
                 hole=0.42,
                 marker=dict(colors=["#14b8a6", "#f97316"]),
                 textinfo="label+percent",
@@ -322,7 +340,7 @@ with st.expander("展開 / 收合：機台異常排查與處置報告", expanded
 # 🚨 【機台異常排查與處置報告】
 
 ## 一、 異常現況與初步分類
-* **通報機台/代碼**：{selected_machine} / {selected_alarm}
+* **通報機台/代碼**：{applied_machine} / {applied_alarm}
 * **故障可能類別**：{alarm_info["category"]}
 * **異常摘要**：{alarm_info["summary"]}
 
